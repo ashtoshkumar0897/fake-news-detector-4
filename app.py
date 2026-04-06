@@ -191,7 +191,7 @@ HF_API_BASE     = "https://api-inference.huggingface.co/models"
 MODEL_TEXT      = "vikram71198/distilroberta-base-finetuned-fake-news-detection"
 MODEL_AI_IMAGE  = "umm-maybe/AI-image-detector"
 MODEL_CLIP      = "openai/clip-vit-base-patch32"
-API_TIMEOUT     = 30
+API_TIMEOUT     = 60
 API_MAX_RETRIES = 3
 
 
@@ -212,7 +212,9 @@ def hf_post_json(endpoint, payload, key, retries=API_MAX_RETRIES):
     last_err = None
     for attempt in range(retries):
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=API_TIMEOUT)
+            resp = requests.post(url, headers=headers, json=payload,
+                                 timeout=API_TIMEOUT, stream=False)
+            resp.raw.read()  # force full response body into buffer before parsing
             if resp.status_code == 503:
                 wait = min(8 * (attempt + 1), 25)
                 time.sleep(wait)
@@ -220,6 +222,9 @@ def hf_post_json(endpoint, payload, key, retries=API_MAX_RETRIES):
             if resp.status_code == 200:
                 return resp.json(), None
             return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except requests.exceptions.ChunkedEncodingError as exc:
+            last_err = f"Incomplete response (retry {attempt + 1}): {exc}"
+            time.sleep(3 * (attempt + 1))
         except requests.exceptions.Timeout:
             last_err = "Request timed out"
         except requests.exceptions.ConnectionError as exc:
@@ -235,7 +240,9 @@ def hf_post_bytes(endpoint, image_bytes, key, retries=API_MAX_RETRIES):
     last_err = None
     for attempt in range(retries):
         try:
-            resp = requests.post(url, headers=headers, data=image_bytes, timeout=API_TIMEOUT)
+            resp = requests.post(url, headers=headers, data=image_bytes,
+                                 timeout=API_TIMEOUT, stream=False)
+            resp.raw.read()  # force full response body into buffer before parsing
             if resp.status_code == 503:
                 wait = min(8 * (attempt + 1), 25)
                 time.sleep(wait)
@@ -243,6 +250,9 @@ def hf_post_bytes(endpoint, image_bytes, key, retries=API_MAX_RETRIES):
             if resp.status_code == 200:
                 return resp.json(), None
             return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        except requests.exceptions.ChunkedEncodingError as exc:
+            last_err = f"Incomplete response (retry {attempt + 1}): {exc}"
+            time.sleep(3 * (attempt + 1))
         except requests.exceptions.Timeout:
             last_err = "Request timed out"
         except requests.exceptions.ConnectionError as exc:
@@ -581,7 +591,7 @@ def extract_video_frames(video_bytes, max_frames=12):
     return frames, meta
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def get_face_cascade():
     return cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
