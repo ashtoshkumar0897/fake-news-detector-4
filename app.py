@@ -581,7 +581,7 @@ def extract_video_frames(video_bytes, max_frames=12):
     return frames, meta
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def get_face_cascade():
     return cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
