@@ -191,7 +191,7 @@ HF_API_BASE     = "https://api-inference.huggingface.co/models"
 MODEL_TEXT      = "vikram71198/distilroberta-base-finetuned-fake-news-detection"
 MODEL_AI_IMAGE  = "umm-maybe/AI-image-detector"
 MODEL_CLIP      = "openai/clip-vit-base-patch32"
-API_TIMEOUT     = 60
+API_TIMEOUT     = 30
 API_MAX_RETRIES = 3
 
 
@@ -212,9 +212,7 @@ def hf_post_json(endpoint, payload, key, retries=API_MAX_RETRIES):
     last_err = None
     for attempt in range(retries):
         try:
-            resp = requests.post(url, headers=headers, json=payload,
-                                 timeout=API_TIMEOUT, stream=False)
-            resp.raw.read()  # force full response body into buffer before parsing
+            resp = requests.post(url, headers=headers, json=payload, timeout=API_TIMEOUT)
             if resp.status_code == 503:
                 wait = min(8 * (attempt + 1), 25)
                 time.sleep(wait)
@@ -222,9 +220,6 @@ def hf_post_json(endpoint, payload, key, retries=API_MAX_RETRIES):
             if resp.status_code == 200:
                 return resp.json(), None
             return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
-        except requests.exceptions.ChunkedEncodingError as exc:
-            last_err = f"Incomplete response (retry {attempt + 1}): {exc}"
-            time.sleep(3 * (attempt + 1))
         except requests.exceptions.Timeout:
             last_err = "Request timed out"
         except requests.exceptions.ConnectionError as exc:
@@ -234,31 +229,51 @@ def hf_post_json(endpoint, payload, key, retries=API_MAX_RETRIES):
     return None, last_err or "Max retries exceeded"
 
 
+def compress_image_for_api(img_pil, max_side=320, max_bytes=90000, quality_start=82):
+    img = img_pil.convert("RGB")
+    w, h = img.size
+    if max(w, h) > max_side:
+        r = max_side / max(w, h)
+        img = img.resize((int(w * r), int(h * r)), Image.LANCZOS)
+    for q in range(quality_start, 38, -8):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=q)
+        data = buf.getvalue()
+        if len(data) <= max_bytes:
+            return data
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=38)
+    return buf.getvalue()
+
+
 def hf_post_bytes(endpoint, image_bytes, key, retries=API_MAX_RETRIES):
     url      = f"{HF_API_BASE}/{endpoint}"
     headers  = {**hf_headers(key), "Content-Type": "application/octet-stream"}
     last_err = None
     for attempt in range(retries):
         try:
-            resp = requests.post(url, headers=headers, data=image_bytes,
-                                 timeout=API_TIMEOUT, stream=False)
-            resp.raw.read()  # force full response body into buffer before parsing
+            resp = requests.post(
+                url, headers=headers, data=image_bytes,
+                timeout=API_TIMEOUT, stream=False
+            )
             if resp.status_code == 503:
-                wait = min(8 * (attempt + 1), 25)
-                time.sleep(wait)
+                time.sleep(min(8 * (attempt + 1), 25))
                 continue
             if resp.status_code == 200:
-                return resp.json(), None
+                try:
+                    return resp.json(), None
+                except Exception:
+                    return None, "JSON decode error"
             return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
         except requests.exceptions.ChunkedEncodingError as exc:
-            last_err = f"Incomplete response (retry {attempt + 1}): {exc}"
-            time.sleep(3 * (attempt + 1))
+            last_err = f"IncompleteRead — image too large or connection dropped: {str(exc)[:120]}"
+            time.sleep(4 * (attempt + 1))
         except requests.exceptions.Timeout:
             last_err = "Request timed out"
         except requests.exceptions.ConnectionError as exc:
-            last_err = f"Connection error: {exc}"
+            last_err = f"Connection error: {str(exc)[:120]}"
         except Exception as exc:
-            last_err = str(exc)
+            last_err = str(exc)[:200]
     return None, last_err or "Max retries exceeded"
 
 
@@ -299,13 +314,8 @@ def api_predict_text_fake_news(text, key):
     return label, round(confidence * 100, 1), None
 
 
-def api_detect_ai_image(img_pil, key, max_side=512):
-    w, h = img_pil.size
-    if max(w, h) > max_side:
-        ratio = max_side / max(w, h)
-        img_pil = img_pil.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-
-    img_bytes    = pil_to_bytes(img_pil)
+def api_detect_ai_image(img_pil, key, max_side=320):
+    img_bytes    = compress_image_for_api(img_pil, max_side=max_side)
     result, err  = hf_post_bytes(MODEL_AI_IMAGE, img_bytes, key)
     if err or result is None:
         return None, err
@@ -321,24 +331,16 @@ def api_detect_ai_image(img_pil, key, max_side=512):
     return 50.0, None
 
 
-def api_clip_similarity(img_pil, headline_text, key, max_side=336):
-    w, h = img_pil.size
-    if max(w, h) > max_side:
-        ratio = max_side / max(w, h)
-        img_pil = img_pil.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-
-    img_bytes   = pil_to_bytes(img_pil)
+def api_clip_similarity(img_pil, headline_text, key, max_side=224):
+    img_bytes   = compress_image_for_api(img_pil, max_side=max_side)
     candidate_a = headline_text[:200]
     candidate_b = "an unrelated image with different subject matter"
 
-    result, err = hf_post_bytes(
-        f"{MODEL_CLIP}",
-        img_bytes,
-        key,
-    )
+    result, err = hf_post_bytes(MODEL_CLIP, img_bytes, key)
     if err or result is None:
+        small_b64 = base64.b64encode(img_bytes).decode("utf-8")
         payload = {
-            "inputs": {"image": pil_to_b64(img_pil)},
+            "inputs": {"image": small_b64},
             "parameters": {"candidate_labels": [candidate_a, candidate_b]},
         }
         result, err = hf_post_json(MODEL_CLIP, payload, key)
@@ -591,7 +593,7 @@ def extract_video_frames(video_bytes, max_frames=12):
     return frames, meta
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def get_face_cascade():
     return cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
