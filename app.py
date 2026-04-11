@@ -189,7 +189,11 @@ st.markdown("""
 
 HF_API_BASE     = "https://api-inference.huggingface.co/models"
 MODEL_TEXT      = "vikram71198/distilroberta-base-finetuned-fake-news-detection"
-MODEL_AI_IMAGE  = "prithivMLmods/AI-vs-Deepfake-vs-Real-9999"
+MODEL_AI_IMAGE_CASCADE = [
+    "dima806/deepfake_vs_real_image_detection",
+    "prithivMLmods/Deep-Fake-Detector-v2-Model",
+    "Wvolf/ViT_Deepfake_Detection",
+]
 MODEL_CLIP      = "openai/clip-vit-base-patch32"
 API_TIMEOUT     = 30
 API_MAX_RETRIES = 3
@@ -318,25 +322,44 @@ def api_predict_text_fake_news(text, key):
     return label, round(confidence * 100, 1), None
 
 
-def api_detect_ai_image(img_pil, key, max_side=320):
-    img_bytes   = compress_image_for_api(img_pil, max_side=max_side)
-    result, err = hf_post_bytes(MODEL_AI_IMAGE, img_bytes, key)
-    if err or result is None:
-        return None, err
-
+def _parse_ai_image_result(result):
+    real_kw = {"real", "realism", "authentic", "genuine"}
+    fake_kw = {"fake", "deepfake", "artificial", "ai", "generated",
+               "synthetic", "manipulated", "forged"}
     real_score = 0.0
     fake_score = 0.0
+    matched    = False
     for item in result:
         lbl = item.get("label", "").lower()
         s   = float(item.get("score", 0.0))
-        if "real" in lbl:
-            real_score = s
-        else:
+        if any(k in lbl for k in real_kw):
+            real_score += s
+            matched = True
+        elif any(k in lbl for k in fake_kw):
             fake_score += s
-    if real_score == 0.0 and fake_score == 0.0:
-        return 50.0, None
+            matched = True
+    if not matched:
+        return None
     total = real_score + fake_score
-    return round((fake_score / total) * 100, 1) if total > 0 else 50.0, None
+    return round((fake_score / total) * 100, 1) if total > 0 else 50.0
+
+
+def api_detect_ai_image(img_pil, key, max_side=320):
+    img_bytes  = compress_image_for_api(img_pil, max_side=max_side)
+    last_err   = None
+    for model_id in MODEL_AI_IMAGE_CASCADE:
+        result, err = hf_post_bytes(model_id, img_bytes, key)
+        if err:
+            last_err = f"{model_id}: {err}"
+            continue
+        if result is None:
+            last_err = f"{model_id}: empty response"
+            continue
+        score = _parse_ai_image_result(result)
+        if score is not None:
+            return score, None
+        last_err = f"{model_id}: unrecognised label format"
+    return None, last_err or "All cascade models unavailable"
 
 
 def api_clip_similarity(img_pil, headline_text, key, max_side=224):
@@ -929,7 +952,7 @@ with tab_img:
                     <div class="metric-row" style="justify-content:center;margin-top:0.8rem;flex-direction:column;gap:0.4rem;">
                         <div class="metric-chip metric-chip-ai">AI Generated<strong>{ap}%</strong></div>
                         <div class="metric-chip">Authentic / Real<strong>{round(100-ap,1)}%</strong></div>
-                        <div class="metric-chip">Model<strong style="font-size:0.65rem;">prithivMLmods/AI-vs-Deepfake-vs-Real-9999</strong></div>
+                        <div class="metric-chip">Model<strong style="font-size:0.65rem;">dima806/deepfake_vs_real_image_detection (cascade)</strong></div>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -1159,7 +1182,7 @@ with tab_setup:
     | Module | Model | Task | Why It Was Chosen |
     |---|---|---|---|
     | 📝 Text | `vikram71198/distilroberta-base-finetuned-fake-news-detection` | Text classification | Fine-tuned on 24K+ labeled real/fake news articles; ~90%+ accuracy |
-    | 🖼️ Image | `prithivMLmods/AI-vs-Deepfake-vs-Real-9999` | Image classification | ViT fine-tuned on real vs AI-generated image pairs (Midjourney, DALL·E, SD) |
+    | 🖼️ Image | `dima806/deepfake_vs_real_image_detection (cascade)` | Image classification | ViT fine-tuned on real vs AI-generated image pairs (Midjourney, DALL·E, SD) |
     | 🎥 Video | Same as image — applied per frame | Image classification | Frame-level AI generation scoring; averages across 5 sampled frames |
     | 🔗 Cross-Modal | `openai/clip-vit-base-patch32` | Zero-shot image classification | Shared text+image embedding space; true cosine similarity between headline and image |
 
